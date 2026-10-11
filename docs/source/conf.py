@@ -252,6 +252,7 @@ napoleon_type_aliases = {
     'TypeVar': '~typing.TypeVar',
     'ValidatedDict': '~bpod_core.misc.ValidatedDict',
     'ColorType': '~pydantic_extra_types.color.ColorType',
+    'Filter': '~bpod_core.filtering.Filter',
 }
 
 # -- FSM diagrams --------------------------------------------------------------
