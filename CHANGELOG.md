@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `com.FilterValue`, superseded by `filtering.Filter`.
 
+### Fixed
+
+- module events and softcodes never reached the state machine: the firmware drops
+  them until told how many events each serial channel may report (`%`), which is
+  now sent whenever modules are updated.
+- physical input events (ports, BNC, Flex, ...) were numbered one off from the
+  firmware when the softcodes did not split evenly across the USB channels, e.g.
+  with a module reporting more or fewer than 15 events. The remainder now goes to
+  the last USB channel.
+
 ## [0.1.0a14] - 2026-07-24
 
 ### Added

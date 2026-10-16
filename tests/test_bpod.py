@@ -193,6 +193,93 @@ class TestGetHardwareConfiguration:
         assert mock_bpod.serial0.in_waiting == 0
 
 
+def _bpod_2p_hardware(mock_bpod):
+    """Load the hardware configuration of a Bpod 2+ (firmware 23) into ``mock_bpod``."""
+    mock_bpod.serial0.mock_responses = {
+        b'H': struct.pack(
+            '<2H6B16s1B21s',
+            256,  # max_states
+            100,  # timer_period
+            75,  # max_serial_events
+            5,  # max_bytes_per_serial_message
+            16,  # n_global_timers
+            8,  # n_global_counters
+            16,  # n_conditions
+            16,  # n_inputs
+            b'UUUXZFFFFBBPPPPP',  # input_description
+            21,  # n_outputs
+            b'UUUXZFFFFBBPPPPPVVVVV',  # output_description
+        ),
+    }
+    mock_bpod.version.firmware = (23, 0)
+    Bpod._get_hardware_configuration(mock_bpod)
+
+
+def _modules(*n_events):
+    """Mock modules reporting the given numbers of events."""
+    modules = {}
+    for idx, n in enumerate(n_events, start=1):
+        module = MagicMock()
+        module.name = f'Module{idx}'
+        module.event_names = [f'Module{idx}_{i}' for i in range(1, n + 1)]
+        modules[module.name] = module
+    return modules
+
+
+class TestSerialEventAllocation:
+    @pytest.mark.parametrize(
+        ('module_events', 'allocation'),
+        [
+            ((15, 15, 15), (15, 15, 15, 15, 15)),  # default: softcodes split evenly
+            (
+                (24, 15, 15),
+                (24, 15, 15, 10, 11),
+            ),  # remainder goes to the last USB channel
+        ],
+    )
+    def test_allocation_matches_event_numbering(
+        self, mock_bpod, module_events, allocation
+    ):
+        """The allocation and the event names must both span max_serial_events."""
+        _bpod_2p_hardware(mock_bpod)
+        mock_bpod.modules = _modules(*module_events)
+        mock_bpod.inputs = {}
+        Bpod._compile_input_events(mock_bpod)
+        assert mock_bpod._serial_event_allocation == bytes(allocation)
+        assert sum(allocation) == mock_bpod._hardware.max_serial_events
+        # the firmware numbers the first physical input event max_serial_events
+        assert (
+            mock_bpod._event_indices['Flex1_0'] == mock_bpod._hardware.max_serial_events
+        )
+        assert mock_bpod._n_softcodes == allocation[3]
+
+    def test_allocation_is_sent(self, mock_bpod):
+        """The allocation is sent to the state machine with the '%' command."""
+        mock_bpod._serial_event_allocation = bytes((24, 15, 15, 10, 11))
+        mock_bpod.serial0.mock_responses = {b'%': b'\x01'}
+        Bpod._send_serial_event_allocation(mock_bpod)
+        assert mock_bpod.serial0.last_write == b'%' + bytes((24, 15, 15, 10, 11))
+
+    def test_allocation_sent_when_modules_are_discovered(
+        self, mock_bpod_2p_module, mock_ext_serial
+    ):
+        """A Bpod 2+ with a 24-event module on port 1 gets its allocation on connect."""
+        sent = [call.args[0] for call in mock_ext_serial.write.call_args_list]
+        assert b'%' + bytes((24, 15, 15, 10, 11)) in sent
+        indices = mock_bpod_2p_module._event_indices
+        module = mock_bpod_2p_module.modules['DIO_12Ch_Stream1']
+        assert len(module.event_names) == 24
+        assert indices[module.event_names[0]] == 0
+        assert indices['Flex1_0'] == 75  # max_serial_events, where the firmware puts it
+
+    def test_unacknowledged_allocation_raises(self, mock_bpod):
+        """A state machine that does not acknowledge the allocation is an error."""
+        mock_bpod._serial_event_allocation = bytes(5)
+        mock_bpod.serial0.mock_responses = {b'%': b'\x00'}
+        with pytest.raises(BpodError, match='did not acknowledge'):
+            Bpod._send_serial_event_allocation(mock_bpod)
+
+
 class TestBpodHandshake:
     def test_handshake_success(self, mock_bpod, caplog):
         """Test successful handshake with Bpod."""

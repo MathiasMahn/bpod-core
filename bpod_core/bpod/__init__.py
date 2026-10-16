@@ -208,6 +208,7 @@ class Bpod(SerialDevice, AbstractBpod):
         self._hardware_hash: bytes = b''
 
         self._n_softcodes = 0
+        self._serial_event_allocation = b''
         self._softcode_thread = SoftcodeThread(softcode_handler=self._softcode_handler)
         self._softcode_thread.start()
 
@@ -712,6 +713,14 @@ class Bpod(SerialDevice, AbstractBpod):
         n_usb_ext = hw.input_description.count(b'Z')
         n_softcodes_per_usb = n_softcodes // (n_usb + n_usb_ext)
         n_app_softcodes = n_usb_ext * n_softcodes_per_usb
+        # The firmware places the first physical input event at max_serial_events,
+        # whatever the split, so the serial channels must account for every serial
+        # event: the remainder of the split goes to the last USB channel.
+        n_remainder = n_softcodes - n_softcodes_per_usb * (n_usb + n_usb_ext)
+        if n_usb_ext:
+            n_app_softcodes += n_remainder
+        n_usb_softcodes = n_softcodes_per_usb + (0 if n_usb_ext else n_remainder)
+        serial_event_allocation: list[int] = []
         event_names: list[str] = []
         event_channels: list[str | None] = []
         event_values: list[int | None] = []
@@ -726,9 +735,9 @@ class Bpod(SerialDevice, AbstractBpod):
                 ev_channels: list[str | None] = [module.name] * len(ev_names)
                 ev_values: list[int | None] = [None] * len(ev_names)
             elif io_key == b'X':  # SoftCode
-                ev_names = [f'{channel_name}{i}' for i in range(n_softcodes_per_usb)]
-                ev_channels = [channel_name] * n_softcodes_per_usb
-                ev_values = list(range(n_softcodes_per_usb))
+                ev_names = [f'{channel_name}{i}' for i in range(n_usb_softcodes)]
+                ev_channels = [channel_name] * n_usb_softcodes
+                ev_values = list(range(n_usb_softcodes))
             elif io_key == b'Z':  # SoftCodeApp
                 ev_names = [f'{channel_name}{i}' for i in range(n_app_softcodes)]
                 ev_channels = [channel_name] * n_app_softcodes
@@ -746,6 +755,8 @@ class Bpod(SerialDevice, AbstractBpod):
             else:
                 logger.warning('Skipping unsupported input channel: %s', io_key)
                 continue
+            if io_key in b'UXZ':
+                serial_event_allocation.append(len(ev_names))
             event_names.extend(ev_names)
             event_channels.extend(ev_channels)
             event_values.extend(ev_values)
@@ -789,7 +800,8 @@ class Bpod(SerialDevice, AbstractBpod):
         event_channels.append(None)
         event_values.append(None)
 
-        self._n_softcodes = n_softcodes_per_usb
+        self._n_softcodes = n_usb_softcodes
+        self._serial_event_allocation = bytes(serial_event_allocation)
         self._input_events = _InputEvents(
             names=event_names, channels=event_channels, values=event_values
         )
@@ -923,10 +935,33 @@ class Bpod(SerialDevice, AbstractBpod):
         # update event names and output actions
         self._compile_input_events()
         self._compile_output_actions()
+        self._send_serial_event_allocation()
         self._event_lookup = _build_event_lookup(self._input_events, self._actions)
 
         # compute hardware identity hash for cache keying
         self._hardware_hash = self._compute_hardware_hash()
+
+    def _send_serial_event_allocation(self) -> None:
+        """Tell the state machine how many events each serial channel may report.
+
+        The firmware drops any module byte above the count for its module port, and any
+        softcode at or above the count for its USB channel. All counts are zero until
+        the ``%`` command sets them, so without it no module event or softcode ever
+        reaches the state machine. The counts follow the event numbering built in
+        :meth:`_compile_input_events`.
+
+        Raises
+        ------
+        BpodError
+            If the state machine does not acknowledge the allocation.
+        """
+        if not self.serial0.verify(b'%' + self._serial_event_allocation):
+            raise BpodError(
+                'The state machine did not acknowledge the serial event allocation'
+            )
+        logger.debug(
+            'Serial event allocation sent: %s', list(self._serial_event_allocation)
+        )
 
     def _compute_hardware_hash(self) -> bytes:
         """Compute a hash for the current hardware configuration."""
