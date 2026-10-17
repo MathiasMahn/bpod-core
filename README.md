@@ -25,7 +25,7 @@ from Python, and is designed to fit naturally into everyday research workflows. 
 maintained by the software development team at the
 [*International Brain Laboratory*](https://internationalbrainlab.org/).
 
-## Goals
+### Goals
 
 * **Interface to Bpod Devices:** Provides an interface for interacting with Bpod
   devices.
@@ -36,7 +36,7 @@ maintained by the software development team at the
 * **Performance-Oriented:** Designed to be lean and fast.
 * **Quality Assurance:** Typed, tested, and documented.
 
-## Non-Goals
+### Non-Goals
 
 * **No GUI:** Does not include a graphical user interface.
 * **Limited High-Level Functionality:** Does not provide features such as data
