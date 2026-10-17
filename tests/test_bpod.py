@@ -425,6 +425,13 @@ class TestRemoteCall:
         assert all(callable(getattr(Bpod, name)) for name in method_set)
 
 
+def test_exit_closes_ipc_service(mock_bpod_2p):
+    """Leaving the context closes the IPC service, releasing its sockets."""
+    with mock_bpod_2p:
+        pass
+    mock_bpod_2p._zmq.close.assert_called_once()
+
+
 class TestBpodSubscriberWait:
     def test_waits_for_subscribers_when_supervised(self, monkeypatch, request):
         """With BPOD_OVERRIDE_REMOTE set, init waits for a PUB/SUB subscriber."""

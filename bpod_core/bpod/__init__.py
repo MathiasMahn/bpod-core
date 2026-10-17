@@ -436,7 +436,7 @@ class Bpod(SerialDevice, AbstractBpod):
         )
 
     def _stop_zmq(self) -> None:
-        if hasattr(self, '_zmq_service'):
+        if hasattr(self, '_zmq'):
             self._zmq.close()
 
     @property
