@@ -43,6 +43,9 @@ _INITIAL_BUFFER_SIZE = 2048
 _OUTPUT_ID_OFFSET = 1000
 """Event ID offset for output action events."""
 
+_SOFTCODE_STOP = RawSoftcode(-1, 0, 0)
+"""Sentinel that ends :class:`SoftcodeThread` once the softcodes before it are done."""
+
 _EVENT_DTYPE = np.dtype(
     [
         ('time', 'datetime64[us]'),
@@ -748,6 +751,13 @@ class SoftcodeThread(threading.Thread):
             logger.warning('Waiting for softcodes to be processed ...')
         self._idle.wait()
 
+    def stop(self) -> None:
+        """Process the softcodes still queued, then end the thread."""
+        self.queue.put(_SOFTCODE_STOP)
+        self.join(timeout=1)
+        if self.is_alive():
+            logger.warning('Softcode thread did not terminate')
+
     def set_handler(self, handler: Callable[[int], None] | None) -> None:
         """Set the softcode handler, taking effect on the next received softcode."""
         self._softcode_handler = handler
@@ -765,8 +775,8 @@ class SoftcodeThread(threading.Thread):
         queue = self.queue
 
         # enter the reading loop
-        while True:
-            softcode, received_ns, micros_us = queue.get()
+        while (item := queue.get()) is not _SOFTCODE_STOP:
+            softcode, received_ns, micros_us = item
             self._idle.clear()
             handler = self._softcode_handler
             if handler is not None:

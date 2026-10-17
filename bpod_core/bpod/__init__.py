@@ -288,6 +288,7 @@ class Bpod(SerialDevice, AbstractBpod):
         self._bpod_finalizer.detach()
         self.close()
         self._stop_zmq()
+        self._softcode_thread.stop()
 
     def open(self) -> None:
         """

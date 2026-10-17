@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - leaving a `Bpod` context did not close its IPC service, so its sockets stayed bound
   until garbage collection and reconnecting right away fell back to random ports.
+- leaving a `Bpod` context did not end its softcode thread, so every connection left
+  an idle thread behind.
 
 ## [0.1.0a14] - 2026-07-24
 

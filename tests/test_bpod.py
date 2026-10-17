@@ -432,6 +432,13 @@ def test_exit_closes_ipc_service(mock_bpod_2p):
     mock_bpod_2p._zmq.close.assert_called_once()
 
 
+def test_exit_stops_softcode_thread(mock_bpod_2p):
+    """Leaving the context ends the softcode thread."""
+    with mock_bpod_2p:
+        pass
+    assert not mock_bpod_2p._softcode_thread.is_alive()
+
+
 class TestBpodSubscriberWait:
     def test_waits_for_subscribers_when_supervised(self, monkeypatch, request):
         """With BPOD_OVERRIDE_REMOTE set, init waits for a PUB/SUB subscriber."""

@@ -531,6 +531,15 @@ class TestSoftcodeThread:
         assert done.wait(timeout=2)
         assert received == [7]
 
+    def test_stop(self, make_thread):
+        """stop() handles the queued softcodes first, then ends the thread."""
+        received = []
+        thread = make_thread(handler=received.append)
+        thread.queue.put(RawSoftcode(3, 0, 0))
+        thread.stop()
+        assert received == [3]
+        assert not thread.is_alive()
+
     def test_handler_called_in_order(self, make_thread):
         """Handler is called once per softcode in the order received."""
         received = []
