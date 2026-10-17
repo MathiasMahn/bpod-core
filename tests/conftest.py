@@ -1,5 +1,4 @@
 import re
-import struct
 from unittest.mock import PropertyMock
 
 import pytest
@@ -190,25 +189,4 @@ def mock_bpod_2p(
     mocker.patch('bpod_core.com.ExtendedSerial', return_value=mock_ext_serial)
     mocker.patch('bpod_core.bpod.Bpod._detect_additional_serial_ports')
     mocker.patch('bpod_core.bpod.ServiceHost')
-    return Bpod('COM3')
-
-
-@pytest.fixture
-def mock_bpod_2p_module(
-    mock_comports, mock_ext_serial, mock_settings, mocker, mock_advertisement
-):
-    """Bpod 2+ with a 24-event module on port 1; ``mock_ext_serial.write`` is a spy."""
-    module_info = (
-        b'\x01'  # module port 1: connected
-        + struct.pack('<IB', 1, 15)  # firmware version, length of name
-        + b'DIO_12Ch_Stream\x01'  # name, more info follows
-        + b'#\x18'  # 24 events
-        + b'\x00'  # no more info
-        + b'\x00\x00'  # module ports 2 and 3: not connected
-    )
-    mock_ext_serial.mock_responses.update({**fixture_bpod_2p, b'M': module_info})
-    mocker.patch('bpod_core.com.ExtendedSerial', return_value=mock_ext_serial)
-    mocker.patch('bpod_core.bpod.Bpod._detect_additional_serial_ports')
-    mocker.patch('bpod_core.bpod.ServiceHost')
-    mocker.spy(mock_ext_serial, 'write')
     return Bpod('COM3')
