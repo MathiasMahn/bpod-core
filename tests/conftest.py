@@ -1,3 +1,4 @@
+import gc
 import re
 from unittest.mock import PropertyMock
 
@@ -99,6 +100,32 @@ def mock_ext_serial(mocker):
     mocker.patch(f'{tmp}.reset_input_buffer')
     mocker.patch(f'{tmp}.in_waiting', new_callable=PropertyMock, side_effect=in_waiting)
     return extended_serial
+
+
+@pytest.fixture
+def assert_collected():
+    """Check that a dropped object was garbage-collected and its threads have ended.
+
+    If it wasn't, the object is closed with ``close``, so that its threads and sockets
+    don't leak into later tests.
+    """
+
+    def check(ref, *threads, close):
+        gc.collect()
+        try:
+            assert ref() is None
+            assert not any(thread.is_alive() for thread in threads)
+        finally:
+            if (obj := ref()) is not None:
+                close(obj)
+
+    return check
+
+
+@pytest.fixture
+def fast_event_loop(mocker):
+    """Shorten the IPC event loops' poll interval, so that they stop quickly."""
+    mocker.patch('bpod_core.ipc._EVENT_LOOP_POLL_MS', 5)
 
 
 @pytest.fixture

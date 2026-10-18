@@ -1,7 +1,10 @@
 import logging
 import struct
 import threading
+import time
+import weakref
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 from serial import SerialException
@@ -12,12 +15,14 @@ from bpod_core.bpod.constants import _REMOTE_CALL_METHODS, _REMOTE_DATA_METHODS
 from bpod_core.bpod.structs import (
     BpodEventUnion,
     EventTrialStart,
+    RawSoftcode,
     RequestCall,
     RequestData,
 )
 from bpod_core.com import ExtendedSerial
 from bpod_core.constants import STRUCT_INT16_LE, STRUCT_UINT8
 from bpod_core.fsm import StateMachine
+from bpod_core.ipc import ErrorData, RemoteError, ServiceHost
 
 
 class TestBpodIdentifyBpod:
@@ -476,6 +481,63 @@ def test_failed_init_raises_original_error(mock_unsupported_firmware, mocker):
         Bpod('COM3')
 
 
+@pytest.fixture
+def real_ipc(mock_bpod_2p, mock_ports_file, fast_event_loop, mocker):
+    """Connect further Bpods to the mocked device with a real IPC service."""
+    mocker.patch('bpod_core.bpod.ServiceHost', ServiceHost)
+    mocker.patch.object(Bpod, '_get_setting', return_value=None)  # no name, location
+    mocker.patch('bpod_core.bpod.uuid5', return_value=uuid4())  # unique socket names
+
+
+def test_dropped_task_cleans_up(real_ipc, assert_collected):
+    """A Bpod, owned by a dropped object that handles its softcodes, is cleaned up."""
+
+    class Task:
+        def __init__(self):
+            self.handled = threading.Event()
+            self.bpod = Bpod('COM3')
+
+            def on_softcode(code):  # a closure over self, not a bound method
+                self.handled.set()
+
+            self.bpod.set_softcode_handler(on_softcode)
+
+    task = Task()
+    task.bpod._softcode_thread.queue.put(RawSoftcode(1, 0, 0))
+    assert task.handled.wait(timeout=2)
+    with RemoteBpod(address=task.bpod.address):  # requests for the IPC service
+        pass
+    bpod_ref = weakref.ref(task.bpod)
+    threads = task.bpod._zmq._event_thread, task.bpod._softcode_thread
+    del task
+    assert_collected(bpod_ref, *threads, close=lambda b: b.__exit__(None, None, None))
+
+
+def test_dropped_remote_bpod_cleans_up(real_ipc, assert_collected):
+    """A subscribed RemoteBpod dropped without leaving its context ends its thread."""
+    with Bpod('COM3') as bpod:
+        events = []
+        remote = RemoteBpod(address=bpod.address, event_callback=events.append)
+        deadline = time.monotonic() + 2
+        while not events and time.monotonic() < deadline:  # slow-joiner safe
+            bpod._zmq.publish(EventTrialStart(time_us=0, trial=0, fsm_hash='00'))
+            time.sleep(0.02)
+        assert events
+        remote_ref = weakref.ref(remote)
+        event_thread = remote._zmq._event_thread
+        del remote
+        assert_collected(remote_ref, event_thread, close=lambda r: r.close())
+
+
+def test_cleanup_runs_softcodes_before_disconnecting(mocker):
+    """The finalizer lets queued softcodes run before disconnecting the Bpod."""
+    calls = MagicMock()
+    mocker.patch.object(Bpod, '_request_disconnect', calls.disconnect)
+    Bpod._bpod_cleanup(calls.serial, calls.softcode_thread)
+    names = [name for name, *_ in calls.mock_calls]
+    assert names.index('softcode_thread.stop') < names.index('disconnect')
+
+
 def test_next_reader_gets_leftover(mock_bpod_2p, mocker):
     """A trial's reader starts with the bytes its predecessor read beyond its trial."""
     read_thread_class = mocker.patch('bpod_core.bpod.ReadThread')
@@ -509,6 +571,14 @@ class TestRemoteBpodEventCallback:
     def mock_client(self, mocker):
         """Mock the ServiceClient used by RemoteBpod."""
         return mocker.patch('bpod_core.bpod.ServiceClient', autospec=True)
+
+    def test_failed_handshake_closes_client(self, mock_client):
+        """A RemoteBpod whose handshake fails closes its connection."""
+        error = RemoteError(ErrorData.from_exception(RuntimeError('Version mismatch')))
+        mock_client.return_value.request.side_effect = error
+        with pytest.raises(RemoteError, match='Version mismatch'):
+            RemoteBpod(address='tcp://127.0.0.1:1', event_callback=print)
+        mock_client.return_value.close.assert_called_once()
 
     def test_callback_subscribes_and_forwards(self, mock_client):
         """With an event_callback, the client subscribes and messages forward."""

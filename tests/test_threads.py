@@ -37,6 +37,7 @@ from bpod_core.bpod.structs import (
     _InputEvents,
 )
 from bpod_core.constants import STRUCT_UINT32_LE, STRUCT_UINT64_LE
+from bpod_core.misc import _HandlerSlot
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -585,9 +586,13 @@ class TestSoftcodeThread:
     @pytest.fixture
     def make_thread(self):
         """Factory: returns a started SoftcodeThread (daemon)."""
+        slots = []  # the thread references its handler slot only weakly
 
-        def _make(handler=None):
-            thread = SoftcodeThread(softcode_handler=handler)
+        def _make(handler=None, *, slot=None):
+            if slot is None:
+                slot = _HandlerSlot(handler)
+                slots.append(slot)
+            thread = SoftcodeThread(handler_slot=slot)
             thread.start()
             return thread
 
@@ -614,6 +619,20 @@ class TestSoftcodeThread:
         thread.queue.put(RawSoftcode(3, 0, 0))
         thread.stop()
         assert received == [3]
+        assert not thread.is_alive()
+
+    def test_stop_from_handler(self, make_thread):
+        """stop() called from within a handler ends the thread without raising."""
+        done = threading.Event()
+
+        def handler(_):
+            thread.stop()
+            done.set()
+
+        thread = make_thread(handler=handler)
+        thread.queue.put(RawSoftcode(1, 0, 0))
+        assert done.wait(timeout=2)
+        thread.join(timeout=2)
         assert not thread.is_alive()
 
     def test_handler_called_in_order(self, make_thread):
@@ -662,8 +681,8 @@ class TestSoftcodeThread:
         assert received == [9]
         assert 'bad softcode' in caplog.text
 
-    def test_set_handler(self, make_thread):
-        """set_handler() swaps the handler; subsequent softcodes use the new one."""
+    def test_swap_handler(self, make_thread):
+        """A new handler in the slot is used for subsequent softcodes."""
         received = []
         done = threading.Event()
 
@@ -671,8 +690,30 @@ class TestSoftcodeThread:
             received.append(('b', code))
             done.set()
 
-        thread = make_thread(handler=lambda code: received.append(('a', code)))
-        thread.set_handler(handler_b)
+        slot = _HandlerSlot(lambda code: received.append(('a', code)))
+        thread = make_thread(slot=slot)
+        slot.handler = handler_b
         thread.queue.put(RawSoftcode(3, 0, 0))
         assert done.wait(timeout=2)
         assert received == [('b', 3)]
+
+    def test_softcodes_dropped_without_slot(self, make_thread, caplog):
+        """Once the handler slot is gone, softcodes are dropped without warnings."""
+        slot = _HandlerSlot(None)
+        thread = make_thread(slot=slot)
+        del slot
+        thread.queue.put(RawSoftcode(1, 0, 0))
+        thread.stop()
+        assert 'no handler' not in caplog.text
+
+    def test_drain_from_handler(self, make_thread):
+        """drain() called from within a handler returns instead of waiting forever."""
+        done = threading.Event()
+
+        def handler(_):
+            thread.drain()
+            done.set()
+
+        thread = make_thread(handler=handler)
+        thread.queue.put(RawSoftcode(1, 0, 0))
+        assert done.wait(timeout=2)

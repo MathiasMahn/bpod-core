@@ -4,6 +4,7 @@ import logging
 import struct
 import threading
 import time
+import weakref
 from collections.abc import Callable, Collection
 from enum import IntEnum, auto
 from queue import SimpleQueue
@@ -31,6 +32,7 @@ from bpod_core.bpod.structs import (
 )
 from bpod_core.com import ExtendedSerial
 from bpod_core.constants import STRUCT_UINT32_LE, STRUCT_UINT64_LE
+from bpod_core.misc import _HandlerSlot
 
 logger = logging.getLogger(__name__)
 
@@ -758,8 +760,10 @@ class SoftcodeThread(threading.Thread):
     :attr:`queue`; ``SoftcodeThread`` drains that queue and calls the registered handler
     for each softcode.
 
-    The handler can be swapped at any time via :meth:`set_handler` without restarting
-    the thread — the new handler takes effect on the next softcode.
+    The thread looks the handler up in a ``_HandlerSlot`` held by its owner, so the
+    handler can be swapped at any time without restarting the thread - the new handler
+    takes effect on the next softcode. Once the owner and its slot are gone, remaining
+    softcodes are dropped.
 
     Handler exceptions are caught, logged, and execution continues.
     """
@@ -770,17 +774,19 @@ class SoftcodeThread(threading.Thread):
     def __init__(
         self,
         *,
-        softcode_handler: Callable[[int], None] | None,
+        handler_slot: _HandlerSlot[Callable[[int], None] | None],
     ) -> None:
         super().__init__(name='SoftcodeThread', daemon=True)
         self.queue: SimpleQueue[RawSoftcode] = SimpleQueue()
-        self._softcode_handler = softcode_handler
+        self._handler_slot = weakref.ref(handler_slot)
         self._idle = threading.Event()
         self._idle.set()
         self._pc_base_ns: int = 0  # perf_counter_ns equivalent of session clock t=0
 
     def drain(self) -> None:
         """Block until the queue is empty and any running handler has returned."""
+        if self is threading.current_thread():
+            return  # called by a handler, which would otherwise wait for itself
         if not self._idle.is_set():
             logger.warning('Waiting for softcodes to be processed ...')
         self._idle.wait()
@@ -788,13 +794,11 @@ class SoftcodeThread(threading.Thread):
     def stop(self) -> None:
         """Process the softcodes still queued, then end the thread."""
         self.queue.put(_SOFTCODE_STOP)
+        if self is threading.current_thread():
+            return  # called by a handler or the garbage collector on this thread
         self.join(timeout=1)
         if self.is_alive():
             logger.warning('Softcode thread did not terminate')
-
-    def set_handler(self, handler: Callable[[int], None] | None) -> None:
-        """Set the softcode handler, taking effect on the next received softcode."""
-        self._softcode_handler = handler
 
     def set_time_reference(self, time_ref: TimeReferences) -> None:
         """Update the session clock reference used for Bpod-relative latency logging."""
@@ -807,12 +811,13 @@ class SoftcodeThread(threading.Thread):
     def run(self) -> None:
         """Execute the SoftcodeThread."""
         queue = self.queue
+        handler_slot = self._handler_slot
 
         # enter the reading loop
         while (item := queue.get()) is not _SOFTCODE_STOP:
             softcode, received_ns, micros_us = item
             self._idle.clear()
-            handler = self._softcode_handler
+            handler = None if (slot := handler_slot()) is None else slot.handler
             if handler is not None:
                 try:
                     start_ns = time.perf_counter_ns()
@@ -836,9 +841,10 @@ class SoftcodeThread(threading.Thread):
                         softcode,
                         exc_info=e,
                     )
-            else:
+            elif slot is not None:  # without a slot, the owner is being collected
                 logger.warning(
                     'Received softcode %d from Bpod but no handler is defined', softcode
                 )
+            del slot, handler  # waiting for the next softcode mustn't pin the owner
             if queue.empty():
                 self._idle.set()

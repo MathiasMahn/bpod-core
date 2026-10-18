@@ -37,6 +37,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an idle thread behind.
 - a `Bpod` that failed to connect, e.g., due to unsupported firmware, kept its serial
   port open until garbage collection and left its softcode thread behind.
+- a `Bpod` or subscribed `RemoteBpod` dropped without closing it, an unfinished
+  `iter_services` iterator, e.g., after a `break`, and any object whose handler for a
+  `ServiceHost`, `ServiceClient` or `Bpod.set_softcode_handler` referred back to it
+  were never garbage-collected, so their connections and threads ran until Python
+  exited.
+- a failed `RemoteBpod` handshake, e.g., due to a version mismatch, or a failed
+  Zeroconf start in `iter_services` left connections or threads running.
+- closing a `Bpod`, `ServiceHost` or `ServiceClient` from within its own handler hung
+  or raised a `RuntimeError`.
+- closing a `ServiceHost` or `LocalServiceAdvertisement` could remove the files of a
+  newer one with the same UUID.
 
 ## [0.1.0a14] - 2026-07-24
 

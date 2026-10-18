@@ -97,6 +97,7 @@ from bpod_core.ipc import (
 from bpod_core.misc import (
     SettingsDict,
     SuggestionDict,
+    _HandlerSlot,
     extend_packed,
     suggest_similar,
     suppress_logging,
@@ -161,7 +162,7 @@ class Bpod(SerialDevice, AbstractBpod):
     ] = FIFOCache(maxsize=1024)
 
     _softcode_thread: SoftcodeThread
-    _softcode_handler: Callable[[int], None] | None = None
+    _softcode_slot: _HandlerSlot[Callable[[int], None] | None]
 
     serial1: ExtendedSerial | None = None
     """Secondary serial device for communication with the Bpod."""
@@ -208,7 +209,8 @@ class Bpod(SerialDevice, AbstractBpod):
         self._hardware_hash: bytes = b''
 
         self._n_softcodes = 0
-        self._softcode_thread = SoftcodeThread(softcode_handler=self._softcode_handler)
+        self._softcode_slot = _HandlerSlot(None)
+        self._softcode_thread = SoftcodeThread(handler_slot=self._softcode_slot)
         self._softcode_thread.start()
 
         try:
@@ -276,10 +278,12 @@ class Bpod(SerialDevice, AbstractBpod):
             self,
             Bpod._bpod_cleanup,
             self._serial,
+            self._softcode_thread,
         )
 
     @staticmethod
-    def _bpod_cleanup(serial: ExtendedSerial) -> None:
+    def _bpod_cleanup(serial: ExtendedSerial, softcode_thread: SoftcodeThread) -> None:
+        softcode_thread.stop()
         with contextlib.suppress(Exception):
             if serial.is_open:
                 Bpod._request_disconnect(serial)
@@ -1776,8 +1780,7 @@ class Bpod(SerialDevice, AbstractBpod):
         softcode_handler : Callable, optional
             The function to call when a softcode is received.
         """
-        self._softcode_handler = softcode_handler
-        self._softcode_thread.set_handler(softcode_handler)
+        self._softcode_slot.handler = softcode_handler
 
 
 class Channel:
@@ -2125,7 +2128,11 @@ class RemoteBpod(AbstractBpod):
             )
         except TimeoutError as e:
             raise TimeoutError('Failed to discover remote Bpod.') from e
-        self._handshake()
+        try:
+            self._handshake()
+        except BaseException:
+            self._zmq.close()
+            raise
 
         # log hardware information
         logger.info(
