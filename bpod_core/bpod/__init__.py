@@ -342,7 +342,9 @@ class Bpod(SerialDevice, AbstractBpod):
         self.wait()
         self._softcode_thread.drain()
         if hasattr(self, 'serial0'):
-            self._request_disconnect(self.serial0)
+            # the Bpod may have been unplugged
+            with contextlib.suppress(SerialException):
+                self._request_disconnect(self.serial0)
         super().close()
 
     @staticmethod
@@ -1642,6 +1644,12 @@ class Bpod(SerialDevice, AbstractBpod):
         Blocks until the state machine's reader and event threads complete - i.e., until
         all of the trial's events have been recorded and published. If no state machine
         is currently running, this method returns immediately.
+
+        Raises
+        ------
+        BpodError
+            If the connection to the Bpod was lost during the trial. The events received
+            up to then are kept.
         """
         read_thread = self._read_thread  # snapshot for thread-safety
         if read_thread is not None and read_thread.is_alive():
@@ -1654,6 +1662,13 @@ class Bpod(SerialDevice, AbstractBpod):
         event_thread = self._event_thread  # snapshot for thread-safety
         if event_thread is not None and event_thread.is_alive():
             event_thread.join()
+
+        if read_thread is not None and (error := read_thread.error) is not None:
+            read_thread.error = None  # report it once
+            trial = read_thread.trial_number
+            raise BpodError(
+                f'Lost connection to the Bpod during trial #{trial}'
+            ) from error
 
     @overload
     def peek_data(

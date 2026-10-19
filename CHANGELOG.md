@@ -48,6 +48,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or raised a `RuntimeError`.
 - closing a `ServiceHost` or `LocalServiceAdvertisement` could remove the files of a
   newer one with the same UUID.
+- unplugging the Bpod during a trial went unnoticed: `wait()` returned as if the trial
+  had ended normally. It now raises a `BpodError`, and `close()` tolerates the
+  vanished port.
 
 ## [0.1.0a14] - 2026-07-24
 

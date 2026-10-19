@@ -538,6 +538,29 @@ def test_cleanup_runs_softcodes_before_disconnecting(mocker):
     assert names.index('softcode_thread.stop') < names.index('disconnect')
 
 
+def test_wait_after_lost_connection(mock_bpod_2p):
+    """wait() raises a lost connection once, with the serial error as its cause."""
+    error = SerialException('device disconnected')
+    mock_bpod_2p._read_thread = MagicMock(
+        error=error, trial_number=3, is_alive=lambda: False
+    )
+    with pytest.raises(
+        BpodError, match='Lost connection to the Bpod during trial #3'
+    ) as e:
+        mock_bpod_2p.wait()
+    assert e.value.__cause__ is error
+    mock_bpod_2p.wait()  # reported already
+
+
+def test_close_after_lost_connection(mock_bpod_2p, mock_ext_serial, mocker):
+    """close() still closes the port if the Bpod can't be told to disconnect."""
+    mocker.patch.object(mock_ext_serial, 'is_open', True)  # reset after the test
+    mocker.patch.object(mock_ext_serial, 'write', side_effect=SerialException('gone'))
+    close = mocker.spy(mock_ext_serial, 'close')  # this port only, not other mocks
+    mock_bpod_2p.close()
+    close.assert_called_once()
+
+
 def test_next_reader_gets_leftover(mock_bpod_2p, mocker):
     """A trial's reader starts with the bytes its predecessor read beyond its trial."""
     read_thread_class = mocker.patch('bpod_core.bpod.ReadThread')

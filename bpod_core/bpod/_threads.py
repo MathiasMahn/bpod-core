@@ -195,7 +195,8 @@ class ReadThread(threading.Thread):
     beyond that packet belong to the next trial, which the Bpod starts right away if
     one is queued; they are kept in :attr:`leftover` for the next ``ReadThread``.
     A :attr:`~_EventID.STOP_SENTINEL` is always enqueued in ``finally`` so
-    :class:`EventThread` can detect termination regardless of how the trial ended.
+    :class:`EventThread` can detect termination regardless of how the trial ended. If
+    the connection to the Bpod is lost, the exception is kept in :attr:`error`.
 
     Parameters
     ----------
@@ -227,6 +228,9 @@ class ReadThread(threading.Thread):
     leftover_received_ns: int
     """When :attr:`leftover` was received (:func:`time.perf_counter_ns`)."""
 
+    error: OSError | None = None
+    """The exception that ended the thread, if the connection to the Bpod was lost."""
+
     def __init__(
         self,
         *,
@@ -253,7 +257,11 @@ class ReadThread(threading.Thread):
 
     def _fill(self) -> None:
         """Read all bytes waiting on the serial port, blocking until there is one."""
-        self._buffer += self._serial.read(max(1, self._serial.in_waiting))
+        try:
+            self._buffer += self._serial.read(max(1, self._serial.in_waiting))
+        except OSError as error:  # including SerialException, e.g., when unplugged
+            self.error = error
+            raise
         self._received_ns = time.perf_counter_ns()
 
     def _take(self, n_bytes: int) -> bytes:

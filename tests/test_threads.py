@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import polars as pl
 import pytest
+from serial import SerialException
 
 from bpod_core.bpod._threads import (
     _TRIAL_DATA_SCHEMA,
@@ -80,6 +81,15 @@ class _TrickleSerial:
         chunk = bytes(self._data[:1])
         del self._data[:1]
         return chunk
+
+
+class _UnpluggedSerial(_TrickleSerial):
+    """Fake serial port that fails once its data is used up, like an unplugged one."""
+
+    def read(self, size: int = 1) -> bytes:
+        if not self._data:
+            raise SerialException('device disconnected')
+        return super().read(size)
 
 
 def _drain(q: SimpleQueue) -> list:
@@ -172,6 +182,18 @@ class TestReadThread:
         thread.start()
         thread.join(timeout=2)
         assert [item.softcode for item in _drain(q_softcodes)] == [3]
+
+    @pytest.mark.filterwarnings('ignore::pytest.PytestUnhandledThreadExceptionWarning')
+    def test_error_is_kept(self, make_thread):
+        """A lost connection ends the trial, keeping the error and the events so far."""
+        data = _CONFIRM_OK + _start(100) + _opcode1([42], n_cycles=5)
+        thread, q_events, _ = make_thread(b'', serial=_UnpluggedSerial(data))
+        thread.start()
+        thread.join(timeout=2)
+        assert isinstance(thread.error, SerialException)
+        events = [e.event_id for e in _drain(q_events)]
+        assert 42 in events
+        assert events[-1] == _EventID.STOP_SENTINEL
 
     def test_packets_split_across_reads(self, make_thread):
         """Packets that arrive one byte at a time are reassembled correctly."""
