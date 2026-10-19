@@ -97,6 +97,7 @@ from bpod_core.ipc import (
 from bpod_core.misc import (
     SettingsDict,
     SuggestionDict,
+    _HandlerSlot,
     extend_packed,
     suggest_similar,
     suppress_logging,
@@ -161,7 +162,7 @@ class Bpod(SerialDevice, AbstractBpod):
     ] = FIFOCache(maxsize=1024)
 
     _softcode_thread: SoftcodeThread
-    _softcode_handler: Callable[[int], None] | None = None
+    _softcode_slot: _HandlerSlot[Callable[[int], None] | None]
 
     serial1: ExtendedSerial | None = None
     """Secondary serial device for communication with the Bpod."""
@@ -208,72 +209,81 @@ class Bpod(SerialDevice, AbstractBpod):
         self._hardware_hash: bytes = b''
 
         self._n_softcodes = 0
-        self._softcode_thread = SoftcodeThread(softcode_handler=self._softcode_handler)
+        self._softcode_slot = _HandlerSlot(None)
+        self._softcode_thread = SoftcodeThread(handler_slot=self._softcode_slot)
         self._softcode_thread.start()
 
-        # identify Bpod by port or serial number, open connection
-        bpod_port, _ = self._identify_bpod(port, serial_number)
-        super().__init__(port=bpod_port, open_connection=True)
-        self._serial_number = self._port_info.serial_number or 'unknown'
+        try:
+            # identify Bpod by port or serial number, open connection
+            bpod_port, _ = self._identify_bpod(port, serial_number)
+            super().__init__(port=bpod_port, open_connection=True)
+            self._serial_number = self._port_info.serial_number or 'unknown'
 
-        # record reference system time
-        self._time_reference = TimeReferences(
-            init_system_time_ns=time_ns(),
-            init_perf_counter_ns=perf_counter_ns(),
-            reset_system_time_ns=0,
-        )
-        self.reset_session_clock()
+            # record reference system time
+            self._time_reference = TimeReferences(
+                init_system_time_ns=time_ns(),
+                init_perf_counter_ns=perf_counter_ns(),
+                reset_system_time_ns=0,
+            )
+            self.reset_session_clock()
 
-        # get firmware version and machine type; enforce version requirements
-        self._get_version_info()
+            # get firmware version and machine type; enforce version requirements
+            self._get_version_info()
 
-        # get the Bpod's onboard hardware configuration
-        self._get_hardware_configuration()
+            # get the Bpod's onboard hardware configuration
+            self._get_hardware_configuration()
 
-        # configure input and output channels
-        self._configure_io()
+            # configure input and output channels
+            self._configure_io()
 
-        # detect additional serial ports
-        self._detect_additional_serial_ports()
+            # detect additional serial ports
+            self._detect_additional_serial_ports()
 
-        # update modules
-        self.update_modules()
+            # update modules
+            self.update_modules()
 
-        # log hardware information
-        logger.info(
-            'Connected to Bpod Finite State Machine %s on %s',
-            self.version.machine_str,
-            self.port,
-        )
-        logger.info(
-            'Firmware Version %d.%d, Serial Number %s, PCB Revision %d',
-            *self.version.firmware,
-            self._serial_number,
-            self.version.pcb,
-        )
+            # log hardware information
+            logger.info(
+                'Connected to Bpod Finite State Machine %s on %s',
+                self.version.machine_str,
+                self.port,
+            )
+            logger.info(
+                'Firmware Version %d.%d, Serial Number %s, PCB Revision %d',
+                *self.version.firmware,
+                self._serial_number,
+                self.version.pcb,
+            )
 
-        # start ZeroMQ service
-        self._start_zmq(use_zeroconf=remote)
-        logger.info('ZeroMQ service started on %s', self.address)
+            # start ZeroMQ service
+            self._start_zmq(use_zeroconf=remote)
+            logger.info('ZeroMQ service started on %s', self.address)
 
-        # when launched by a supervising process (e.g. QBpod), briefly wait for
-        # its subscription to register so the first trial's messages aren't lost
-        # to the PUB/SUB slow-joiner race
-        if 'BPOD_OVERRIDE_REMOTE' in os.environ:
-            if self._zmq.wait_for_subscribers(timeout=1.0):
-                logger.debug('Subscriber registered on the PUB/SUB channel')
-            else:
-                logger.debug('No subscriber registered within timeout')
+            # when launched by a supervising process (e.g. QBpod), briefly wait for
+            # its subscription to register so the first trial's messages aren't lost
+            # to the PUB/SUB slow-joiner race
+            if 'BPOD_OVERRIDE_REMOTE' in os.environ:
+                if self._zmq.wait_for_subscribers(timeout=1.0):
+                    logger.debug('Subscriber registered on the PUB/SUB channel')
+                else:
+                    logger.debug('No subscriber registered within timeout')
+        except BaseException:
+            # release what was acquired so far; report the original error
+            with contextlib.suppress(Exception):
+                self._shutdown()
+            raise
 
         # register destructors
         self._bpod_finalizer = weakref.finalize(
             self,
             Bpod._bpod_cleanup,
             self._serial,
+            self._softcode_thread,
         )
 
     @staticmethod
-    def _bpod_cleanup(serial: ExtendedSerial) -> None:
+    def _bpod_cleanup(serial: ExtendedSerial, softcode_thread: SoftcodeThread) -> None:
+        softcode_thread.stop()
         with contextlib.suppress(Exception):
             if serial.is_open:
                 Bpod._request_disconnect(serial)
@@ -286,8 +296,15 @@ class Bpod(SerialDevice, AbstractBpod):
     ) -> None:
         """Exit context and close connection."""
         self._bpod_finalizer.detach()
-        self.close()
-        self._stop_zmq()
+        self._shutdown()
+
+    def _shutdown(self) -> None:
+        """Close the connection, then end the IPC service and softcode thread."""
+        try:
+            self.close()
+        finally:
+            self._stop_zmq()
+            self._softcode_thread.stop()
 
     def open(self) -> None:
         """
@@ -325,7 +342,9 @@ class Bpod(SerialDevice, AbstractBpod):
         self.wait()
         self._softcode_thread.drain()
         if hasattr(self, 'serial0'):
-            self._request_disconnect(self.serial0)
+            # the Bpod may have been unplugged
+            with contextlib.suppress(SerialException):
+                self._request_disconnect(self.serial0)
         super().close()
 
     @staticmethod
@@ -436,7 +455,7 @@ class Bpod(SerialDevice, AbstractBpod):
         )
 
     def _stop_zmq(self) -> None:
-        if hasattr(self, '_zmq_service'):
+        if hasattr(self, '_zmq'):
             self._zmq.close()
 
     @property
@@ -1583,18 +1602,10 @@ class Bpod(SerialDevice, AbstractBpod):
             publish=self._zmq.publish,
             publish_gate=lambda: self._zmq.has_subscribers,
         )
-        read_thread = ReadThread(
-            serial=self.serial0,
-            state_machine_hash=state_machine_lookup.fsm_hash,
-            trial=self._next_fsm_index,
-            cycle_period_us=self._hardware.cycle_period_us,
-            queue_events=event_thread.queue,
-            queue_softcodes=self._softcode_thread.queue,
-        )
-
         # wait for the previous trial's reader to finish, then resume reading the serial
         # stream without further delay (softcodes and raw events must not wait for the
-        # previous trial's event processing)
+        # previous trial's event processing). The previous reader may already have read
+        # the start of this trial - hand those bytes over to the new reader.
         previous_read_thread = self._read_thread
         if previous_read_thread is not None and previous_read_thread.is_alive():
             logger.debug(
@@ -1602,6 +1613,21 @@ class Bpod(SerialDevice, AbstractBpod):
                 previous_read_thread.trial_number,
             )
             previous_read_thread.join()
+        leftover, leftover_received_ns = (
+            (previous_read_thread.leftover, previous_read_thread.leftover_received_ns)
+            if previous_read_thread is not None
+            else (b'', 0)
+        )
+        read_thread = ReadThread(
+            serial=self.serial0,
+            state_machine_hash=state_machine_lookup.fsm_hash,
+            trial=self._next_fsm_index,
+            cycle_period_us=self._hardware.cycle_period_us,
+            queue_events=event_thread.queue,
+            queue_softcodes=self._softcode_thread.queue,
+            initial_bytes=leftover,
+            initial_received_ns=leftover_received_ns,
+        )
         read_thread.start()
 
         # before the new event thread publishes anything, let the previous one drain its
@@ -1638,6 +1664,12 @@ class Bpod(SerialDevice, AbstractBpod):
         Blocks until the state machine's reader and event threads complete - i.e., until
         all of the trial's events have been recorded and published. If no state machine
         is currently running, this method returns immediately.
+
+        Raises
+        ------
+        BpodError
+            If the connection to the Bpod was lost during the trial. The events received
+            up to then are kept.
         """
         read_thread = self._read_thread  # snapshot for thread-safety
         if read_thread is not None and read_thread.is_alive():
@@ -1650,6 +1682,13 @@ class Bpod(SerialDevice, AbstractBpod):
         event_thread = self._event_thread  # snapshot for thread-safety
         if event_thread is not None and event_thread.is_alive():
             event_thread.join()
+
+        if read_thread is not None and (error := read_thread.error) is not None:
+            read_thread.error = None  # report it once
+            trial = read_thread.trial_number
+            raise BpodError(
+                f'Lost connection to the Bpod during trial #{trial}'
+            ) from error
 
     @overload
     def peek_data(
@@ -1776,8 +1815,7 @@ class Bpod(SerialDevice, AbstractBpod):
         softcode_handler : Callable, optional
             The function to call when a softcode is received.
         """
-        self._softcode_handler = softcode_handler
-        self._softcode_thread.set_handler(softcode_handler)
+        self._softcode_slot.handler = softcode_handler
 
 
 class Channel:
@@ -2179,7 +2217,11 @@ class RemoteBpod(AbstractBpod):
             )
         except TimeoutError as e:
             raise TimeoutError('Failed to discover remote Bpod.') from e
-        self._handshake()
+        try:
+            self._handshake()
+        except BaseException:
+            self._zmq.close()
+            raise
 
         # log hardware information
         logger.info(

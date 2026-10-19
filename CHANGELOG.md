@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unknown filter names now raise `TypeError` instead of silently matching nothing.
 - `com.find_ports` and service discovery ignore filters set to `None` instead of
   matching only `None`-valued or missing attributes.
+- trial data is read from the Bpod in chunks rather than message by message, which
+  lowers the CPU load at high event and softcode rates.
 
 ### Removed
 
@@ -29,6 +31,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- leaving a `Bpod` context did not close its IPC service, so its sockets stayed bound
+  until garbage collection and reconnecting right away fell back to random ports.
+- leaving a `Bpod` context did not end its softcode thread, so every connection left
+  an idle thread behind.
+- a `Bpod` that failed to connect, e.g., due to unsupported firmware, kept its serial
+  port open until garbage collection and left its softcode thread behind.
+- a `Bpod` or subscribed `RemoteBpod` dropped without closing it, an unfinished
+  `iter_services` iterator, e.g., after a `break`, and any object whose handler for a
+  `ServiceHost`, `ServiceClient` or `Bpod.set_softcode_handler` referred back to it
+  were never garbage-collected, so their connections and threads ran until Python
+  exited.
+- a failed `RemoteBpod` handshake, e.g., due to a version mismatch, or a failed
+  Zeroconf start in `iter_services` left connections or threads running.
+- closing a `Bpod`, `ServiceHost` or `ServiceClient` from within its own handler hung
+  or raised a `RuntimeError`.
+- closing a `ServiceHost` or `LocalServiceAdvertisement` could remove the files of a
+  newer one with the same UUID.
+- unplugging the Bpod during a trial went unnoticed: `wait()` returned as if the trial
+  had ended normally. It now raises a `BpodError`, and `close()` tolerates the
+  vanished port.
 - module events and softcodes never reached the state machine. Serial events are
   now allocated to modules as in Bpod's MATLAB software and sent to the state
   machine when modules are updated. This also fixes misnumbered input events with
